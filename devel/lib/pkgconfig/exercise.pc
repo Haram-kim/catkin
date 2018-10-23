@@ -1,0 +1,8 @@
+prefix=/home/haram/catkin_ws/devel
+
+Name: exercise
+Description: Description of exercise
+Version: 0.0.0
+Cflags: 
+Libs: -L/home/haram/catkin_ws/devel/lib 
+Requires: roscpp std_msgs message_runtime cv_bridge sensor_msgs

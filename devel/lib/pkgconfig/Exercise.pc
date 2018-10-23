@@ -1,0 +1,8 @@
+prefix=/home/haram/catkin_ws/devel
+
+Name: Exercise
+Description: Description of Exercise
+Version: 0.0.0
+Cflags: 
+Libs: -L/home/haram/catkin_ws/devel/lib 
+Requires: 
