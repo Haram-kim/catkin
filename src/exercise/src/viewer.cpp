@@ -3,6 +3,7 @@
 #include <Eigen/Core>
 #include <Eigen/Dense>
 #include <Eigen/LU>
+#include <unsupported/Eigen/MatrixFunctions>
 #include "cv_bridge/cv_bridge.h"
 #include "sensor_msgs/Image.h"
 #include <opencv2/opencv.hpp>
@@ -65,7 +66,7 @@ occacc::occacc(){
 }
 
 void occacc::DVO(){
-    cv::Mat IRef, I, DRef, D, IRefGray, IGray, resI, resD, res,
+    cv::Mat IRef, I, DRef, D, IRefGray, IGray, resI, resD, res, w1, w2,
             weighI, weighD, weigh, maskI, maskD, mask, JacI, JacD, Jac;
     cv::cvtColor(rgb_cur, IGray, CV_BGR2GRAY);
     cv::cvtColor(rgb_prev, IRefGray, CV_BGR2GRAY);
@@ -73,10 +74,11 @@ void occacc::DVO(){
     Matrix4f T_upd, T_temp;
     VectorXf xi_upd, xi_temp;
     double weighDeltaI,weighDeltaD,errLast,err,lambda;
+    xi << 0,0,0,0,0,0;
     xi_temp =  xi;
     int lvlmax = 5;
-    ROS_INFO_STREAM("initialize DVO \n");
-    for(int lvl = lvlmax;lvl>0;lvl--){
+ROS_INFO_STREAM("\n\n\n\n Wow!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! \n\n\n\n");
+    for(int lvl = lvlmax;lvl>1;lvl--){
         errLast = 1e10;
         lambda = 0.1;
 
@@ -84,9 +86,8 @@ void occacc::DVO(){
         downScaleImage(IRefGray,IRef,Klvl,lvl);
         downScaleImage(depth_cur,D,Klvl,lvl);
         downScaleImage(depth_prev,DRef,Klvl,lvl);
-        ROS_INFO_STREAM("Image pyramid " << lvl << "\n");
+        ROS_INFO_STREAM("\n\n\n\n !!!!!!!!!!!!!!!!!!!!level up!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! \n\n\n\n");
         for(int iter = 0; iter < 40; iter ++){
-
             deriveErrAnalytic(JacI,JacD,resI,resD,IRef,DRef,I,D,Klvl);
 
             weighDeltaI = (64-exp(lvl-1)*48)/255;
@@ -95,28 +96,36 @@ void occacc::DVO(){
             weighD = Mat::zeros(resD.size(), CV_32F);
             maskI = abs(resI) <= weighDeltaI;
             maskD = abs(resD) <= weighDeltaD;
-            resI = ((1-(resI/weighDeltaI).mul(resI/weighDeltaI))
-                    .mul(1-(resI/weighDeltaI).mul(resI/weighDeltaI)));
-            resD = ((1-(resD/weighDeltaD).mul(resD/weighDeltaD))
-                    .mul(1-(resD/weighDeltaD).mul(resD/weighDeltaD)));
+            w1 = (1-(resI/weighDeltaI).mul(resI/weighDeltaI))
+             .mul(1-(resI/weighDeltaI).mul(resI/weighDeltaI));
+            w2 = (1-(resD/weighDeltaD).mul(resD/weighDeltaD))
+             .mul(1-(resD/weighDeltaD).mul(resD/weighDeltaD));
 
-            weighI.copyTo(resI, maskI);
-            weighD.copyTo(resD, maskD);
-            hconcat(weighI,weighD,weigh);
-            hconcat(JacI,JacD,Jac);
-            hconcat(resI,resD,res);
+            weighI.copyTo(w1, maskI);
+            weighD.copyTo(w2, maskD);
+            vconcat(weighI,weighD,weigh);
+            vconcat(JacI,JacD,Jac);
+            vconcat(resI,resD,res);
+
+            cv::Mat nanMask;
+            reduce(Jac,nanMask,1,CV_REDUCE_SUM);
+            nanMask = (nanMask==nanMask); // revise this...
+            nanMask.convertTo(nanMask,CV_32F);
+            weigh = weigh.mul(nanMask);
+            Jac = Jac.mul(repeat(nanMask,1,6));
+            res = res.mul(nanMask);
             cv::Mat H = (Jac.t()*repeat(weigh,1,6).mul(Jac));
-            cv2eigen(-(H + lambda* (Mat::diag(H.diag(0))).inv())*Jac.t()*(weigh*res),xi_upd);
-
-            xi_temp = xi;
+            cv2eigen(-(H + lambda* (Mat::diag(H.diag(0))).inv())*Jac.t()*(weigh.mul(res)),xi_upd);
+ROS_INFO_STREAM("\n H : \n"<<H <<"\n" << xi_upd);
             xi2T(xi_upd, T_upd);
-            xi2T(xi, T_temp);
+            xi2T(xi_temp, T_temp);
             T = T_upd*T_temp;
-            T2xi(T,xi);
+            T2xi(T,xi_temp);
             mask = res!=0;
+
             weigh.copyTo((Mat)(weigh.mul(res)).mul(res),mask);
             err = mean(weigh).val[0];
-            //TODO: Jacobian, residual, IR
+
             if (err >= errLast){
                 lambda = lambda * 3;
                 xi = xi_temp;
@@ -127,10 +136,9 @@ void occacc::DVO(){
                 lambda = lambda / 1.5;
             }
             errLast = err;
-
         }
     }
-    ROS_INFO_STREAM("\n " << xi);
+    //ROS_INFO_STREAM("\n" << xi);
 }
 void occacc::deriveErrAnalytic(cv::Mat &JacI, cv::Mat &JacD, cv::Mat &resI, cv::Mat &resD,
                                cv::Mat IRef, cv::Mat DRef, cv::Mat I, cv::Mat D, Matrix3f K){
@@ -140,42 +148,49 @@ void occacc::deriveErrAnalytic(cv::Mat &JacI, cv::Mat &JacD, cv::Mat &resI, cv::
     Matrix3f R;
     Matrix4f T;
 
-    JacI = Mat::zeros(Size(JacSize,1),CV_32F);
-    JacD = Mat::zeros(Size(JacSize,1),CV_32F);
+    JacI = Mat::zeros(Size(1,JacSize),CV_32F);
+    JacD = Mat::zeros(Size(1,JacSize),CV_32F);
     xImg = Mat::zeros(Size(I.cols,I.rows),CV_32F);
     yImg = Mat::zeros(Size(I.cols,I.rows),CV_32F);
     xp = Mat::zeros(Size(I.cols,I.rows),CV_32F);
     yp = Mat::zeros(Size(I.cols,I.rows),CV_32F);
     zp = Mat::zeros(Size(I.cols,I.rows),CV_32F);
 
+    I.convertTo(I,CV_32F);
+    IRef.convertTo(IRef,CV_32F);
+    I = I/255;
+    IRef = IRef/255;
     xi2T(xi,T);
     R = T.block<3,3>(0,0);
     t = T.block<3,1>(0,3);
-
-    ROS_INFO_STREAM("deriveErrAnalytic \n" << xi << "\n");
+//ROS_INFO_STREAM("\n"<<R<< " \n"<<t);
+    //ROS_INFO_STREAM(xi<<"\n");
 
     for (int x=0; x < I.cols; x++){
         for (int y=0; y < I.rows; y++){
             p << x, y, 1;
             p = p * DRef.at<double>(y,x);
             pTrans = R*K.inverse()*p + t;
+            //ROS_INFO_STREAM(T);
+//ROS_INFO_STREAM("\n"<<R*K.inverse()<<"\n"<<R<<"\n"<<K<<"\n"<<K.inverse()<<"\n");
+            //ROS_INFO_STREAM(pTrans<<"\n"<< p<<"\n"<< K*pTrans);
             if((pTrans(2) > 0) && (DRef.at<double>(y,x) > 1e-4)){
 
-                ROS_INFO_STREAM("p DRef" << DRef.at<double>(y,x) <<" \n" << p << "\n");
-                ROS_INFO_STREAM("p Trans \n" << pTrans << "\n");
-
                 pTransProj = K*pTrans;
-                xImg.at<double>(y,x) = pTransProj(0) / pTransProj(2);
-                yImg.at<double>(y,x) = pTransProj(1) / pTransProj(2);
-
-                xp.at<double>(y,x) = pTrans(0);
-                yp.at<double>(y,x) = pTrans(1);
-                zp.at<double>(y,x) = pTrans(2);
+                if((pTransProj(0)/pTransProj(2)) >= 0 &&
+                   (pTransProj(0)/pTransProj(2)) < I.cols &&
+                   (pTransProj(1)/pTransProj(2)) >= 0 &&
+                   (pTransProj(1)/pTransProj(2)) < I.rows){
+                    xImg.at<double>(y,x) = (double)(pTransProj(0) / pTransProj(2));
+                    yImg.at<double>(y,x) = (double)(pTransProj(1) / pTransProj(2));
+                    xp.at<double>(y,x) = pTrans(0);
+                    yp.at<double>(y,x) = pTrans(1);
+                    zp.at<double>(y,x) = pTrans(2);
+                }
             }
         }
     }
 
-    ROS_INFO_STREAM("kernel set \n");
     kernel_x = Mat::zeros(3, 3, CV_32F);
     kernel_y = Mat::zeros(3, 3, CV_32F);
     kernel_x.at<double>(1,0) = -0.5;
@@ -183,48 +198,41 @@ void occacc::deriveErrAnalytic(cv::Mat &JacI, cv::Mat &JacD, cv::Mat &resI, cv::
     kernel_y.at<double>(0,1) = -0.5;
     kernel_y.at<double>(2,1) = 0.5;
 
-    ROS_INFO_STREAM("Image filter \n");
     cv::filter2D(I, dxI, -1, kernel_x, Point(-1,-1), 0, BORDER_CONSTANT);
     cv::filter2D(I, dyI, -1, kernel_y, Point(-1,-1), 0, BORDER_CONSTANT);
     cv::filter2D(D, dxD, -1, kernel_x, Point(-1,-1), 0, BORDER_CONSTANT);
     cv::filter2D(D, dyD, -1, kernel_y, Point(-1,-1), 0, BORDER_CONSTANT);
 
-    ROS_INFO_STREAM("reshape image \n");
-    dxI.reshape(JacSize,1);
-    dyI.reshape(JacSize,1);
-    dxD.reshape(JacSize,1);
-    dyD.reshape(JacSize,1);
+    dxI = dxI.reshape(0,JacSize);
+    dyI = dyI.reshape(0,JacSize);
+    dxD = dxD.reshape(0,JacSize);
+    dyD = dyD.reshape(0,JacSize);
 
-    ROS_INFO_STREAM("dxIK set \n");
+    dxI.convertTo(dxI,CV_32F);
+    dyI.convertTo(dyI,CV_32F);
+
+    xp = xp.reshape(0,JacSize);
+    yp = yp.reshape(0,JacSize);
+    zp = zp.reshape(0,JacSize);
+
     dxIK = K(1,1)*dxI;
     dyIK = K(2,2)*dyI;
     dxDK = K(1,1)*dxD;
     dyDK = K(2,2)*dyD;
 
-    // reshape and divide problem.
-
-    ROS_INFO_STREAM("\n ok" << dxIK << " \n" << zp << "\n" << dxI);
-    divide(dxIK, zp, zp,1,-1); // / is right? or divide(a,b,c) would be better? divide 0 problem
-    ROS_INFO_STREAM("\n ok12");
+    JacI = dxIK/zp;
     hconcat(JacI, dyIK/zp, JacI);
-    ROS_INFO_STREAM("\n ok2");
     hconcat(JacI, -(dxIK.mul(xp)+dyIK.mul(yp))/zp.mul(zp), JacI);
     hconcat(JacI, -(dxIK.mul(xp.mul(yp)))/zp.mul(zp)-dyIK.mul(1+(yp/zp).mul(yp/zp)), JacI);
-    hconcat(JacI, dxIK.mul(1+(yp/zp).mul(yp/zp))+dyIK.mul(xp.mul(yp))/zp.mul(zp), JacI);
+    hconcat(JacI, dxIK.mul(1+(yp/zp).mul(yp/zp))+dyIK.mul(xp.mul(yp))/(zp.mul(zp)), JacI);
     hconcat(JacI, (-dxIK.mul(yp)+dyIK.mul(xp))/zp, JacI);
 
-    JacD = dxDK/zp; // / is right? or divide(a,b,c) would be better?
+    JacD = dxDK/zp;
     hconcat(JacD, dyDK/zp, JacD);
     hconcat(JacD, -(dxDK.mul(xp)+dyDK.mul(yp))/zp.mul(zp), JacD);
     hconcat(JacD, -(dxDK.mul(xp.mul(yp)))/zp.mul(zp)-dyDK.mul(1+(yp/zp).mul(yp/zp)), JacD);
-    hconcat(JacD, dxDK.mul(1+(yp/zp).mul(yp/zp))+dyDK.mul(xp.mul(yp))/zp.mul(zp), JacD);
+    hconcat(JacD, dxDK.mul(1+(yp/zp).mul(yp/zp))+dyDK.mul(xp.mul(yp))/(zp.mul(zp)), JacD);
     hconcat(JacD, (-dxDK.mul(yp)+dyDK.mul(xp))/zp, JacD);
-    //JacD.block<JacSize,1>(0,0) = dxDK.mul(zp) ;
-    //JacD.block<JacSize,1>(0,1) = dyDK.mul(zp);
-    //JacD.block<JacSize,1>(0,2) = -(dxDK.mul(xp)+dyDK.mul(yp))/zp.mul(zp);
-    //JacD.block<JacSize,1>(0,3) = -(dxDK.mul(xp.mul(yp)))/zp.mul(zp)-dyDK.mul(1+(yp/zp).mul(yp/zp));
-    //JacD.block<JacSize,1>(0,4) = dxDK.mul(1+(yp/zp).mul(yp/zp))+dyDK.mul(xp.mul(yp))/zp.mul(zp);
-    //JacD.block<JacSize,1>(0,5) = (-dxDK.mul(yp)+dyDK.mul(xp))/zp;
 
     JacI = -JacI;
     JacD = -JacD;
@@ -233,10 +241,15 @@ void occacc::deriveErrAnalytic(cv::Mat &JacI, cv::Mat &JacD, cv::Mat &resI, cv::
     cv::Mat DR;
     remap(I,IR,xImg,yImg,INTER_NEAREST,BORDER_CONSTANT,Scalar(0,0,0));
     remap(D,DR,xImg,yImg,INTER_NEAREST,BORDER_CONSTANT,Scalar(0,0,0));
+
     resI = IRef-IR;
     resD = DRef-DR;
-    resI.reshape(JacSize,1);
-    resD.reshape(JacSize,1);
+
+    showtheimage(resI);
+    imshow("another", I);
+    resI = resI.reshape(0,JacSize);
+    resD = resD.reshape(0,JacSize);
+
 }
 
 void occacc::downScaleImage(cv::Mat &src_img, cv::Mat &dst_img, Matrix3f &dst_K, int num){
@@ -270,6 +283,7 @@ void occacc::showimages(){
     waitKey(30);
 }
 void occacc::showtheimage(cv::Mat image){
+    cv::resize(image,image,cv::Size(640,480),0,0,INTER_NEAREST);
     imshow("image", image);
     waitKey(30);
 }
@@ -282,7 +296,7 @@ void occacc::rgbdCallbackOcc(const sensor_msgs::ImageConstPtr& rgbMsg, const sen
   cv::Mat depth = cv_bridge::toCvShare(depthMsg, sensor_msgs::image_encodings::TYPE_32FC1)->image;
   rgb.copyTo(rgb_cur);
   depth.copyTo(depth_cur);
-
+  depth_cur = depth_cur/1000;
   //downScaleImage(rgb_cur,img,K_proc, 2);
   //ROS_INFO_STREAM("\n" << K_proc);
   showimages();
@@ -295,13 +309,16 @@ void occacc::xi2T(VectorXf &xi, Matrix4f &T){
             xi(5), 0, -xi(3), xi(1),
             -xi(4), xi(3), 0, xi(2),
             0, 0, 0, 0;
-    T = Temp.array().exp();
-
+    T = Temp.exp();
+    ROS_INFO_STREAM("T"<<T);
+    ROS_INFO_STREAM(Temp);
+    ROS_INFO_STREAM(Temp.exp());
+    ROS_INFO_STREAM(xi);
 }
 void occacc::T2xi(Matrix4f &T, VectorXf &xi){
     Matrix4f Temp;
-    Temp = T.array().log();
-    xi << Temp(1,4), Temp(2,4), Temp(3,4), Temp(3,2), Temp(1,3), Temp(2,1);
+    Temp = T.log();
+    xi << Temp(0,3), Temp(1,3), Temp(2,3), Temp(2,1), Temp(0,2), Temp(1,0);
 }
 
 void imageCallback(const sensor_msgs::ImageConstPtr& rgbMsg)
@@ -352,6 +369,6 @@ int main(int argc, char **argv)
   //ros::Subscriber sub_depth = nh.subscribe("/camera/depth_registered/image", 1000, depthCallback);
 
   ros::spin();
-
+  delete OCC;
   return 0;
 }
