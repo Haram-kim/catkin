@@ -68,6 +68,7 @@ occacc::occacc(){
 void occacc::DVO(){
     cv::Mat IRef, I, DRef, D, IRefGray, IGray, resI, resD, res, w1, w2,
             weighI, weighD, weigh, maskI, maskD, mask, JacI, JacD, Jac;
+
     cv::cvtColor(rgb_cur, IGray, CV_BGR2GRAY);
     cv::cvtColor(rgb_prev, IRefGray, CV_BGR2GRAY);
     Matrix3f Klvl;
@@ -101,22 +102,27 @@ ROS_INFO_STREAM("\n\n\n\n Wow!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! \n\n\n\n
             w2 = (1-(resD/weighDeltaD).mul(resD/weighDeltaD))
              .mul(1-(resD/weighDeltaD).mul(resD/weighDeltaD));
 
-            weighI.copyTo(w1, maskI);
-            weighD.copyTo(w2, maskD);
+            w1.copyTo(weighI, maskI);
+            w2.copyTo(weighD, maskD);
             vconcat(weighI,weighD,weigh);
             vconcat(JacI,JacD,Jac);
             vconcat(resI,resD,res);
 
-            cv::Mat nanMask;
-            reduce(Jac,nanMask,1,CV_REDUCE_SUM);
-            nanMask = (nanMask==nanMask); // revise this...
-            nanMask.convertTo(nanMask,CV_32F);
-            weigh = weigh.mul(nanMask);
-            Jac = Jac.mul(repeat(nanMask,1,6));
-            res = res.mul(nanMask);
+            cv::Mat JacSum;
+            reduce(Jac,JacSum,1,CV_REDUCE_SUM);
+
+            Mat ZEROS = Mat::zeros(res.size(), CV_32F);
+            Mat ZEROS_Jac = Mat::zeros(Jac.size(), CV_32F);
+
+            cv::Mat nanMask = (JacSum!=JacSum);
+
+            ZEROS.copyTo(weigh,nanMask);
+            ZEROS_Jac.copyTo(Jac,repeat(nanMask,1,6));
+            ZEROS.copyTo(res,nanMask);
+            ROS_INFO_STREAM("Jac \n"<< Jac<<"\n res \n"<< res << "\n weigh \n" << weigh);
             cv::Mat H = (Jac.t()*repeat(weigh,1,6).mul(Jac));
             cv2eigen(-(H + lambda* (Mat::diag(H.diag(0))).inv())*Jac.t()*(weigh.mul(res)),xi_upd);
-ROS_INFO_STREAM("\n H : \n"<<H <<"\n" << xi_upd);
+            ROS_INFO_STREAM("\n H : \n"<<H <<"\n" << xi_upd);
             xi2T(xi_upd, T_upd);
             xi2T(xi_temp, T_temp);
             T = T_upd*T_temp;
@@ -220,9 +226,9 @@ void occacc::deriveErrAnalytic(cv::Mat &JacI, cv::Mat &JacD, cv::Mat &resI, cv::
     dxDK = K(1,1)*dxD;
     dyDK = K(2,2)*dyD;
 
-    JacI = dxIK/zp;
-    hconcat(JacI, dyIK/zp, JacI);
-    hconcat(JacI, -(dxIK.mul(xp)+dyIK.mul(yp))/zp.mul(zp), JacI);
+    JacI = dxIK/zp; // show always 0
+    hconcat(JacI, dyIK/zp, JacI); // show always 0
+    hconcat(JacI, -(dxIK.mul(xp)+dyIK.mul(yp))/zp.mul(zp), JacI); // show always 0
     hconcat(JacI, -(dxIK.mul(xp.mul(yp)))/zp.mul(zp)-dyIK.mul(1+(yp/zp).mul(yp/zp)), JacI);
     hconcat(JacI, dxIK.mul(1+(yp/zp).mul(yp/zp))+dyIK.mul(xp.mul(yp))/(zp.mul(zp)), JacI);
     hconcat(JacI, (-dxIK.mul(yp)+dyIK.mul(xp))/zp, JacI);
